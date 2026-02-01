@@ -128,8 +128,11 @@ jobs:
           make -j$(nproc)
           make install_sw
           
-          echo "✓ OpenSSL built"
+          echo "✓ OpenSSL built successfully"
           ls -lh $HOME/openssl-${{ matrix.android_arch }}/lib/
+          echo ""
+          echo "OpenSSL installation:"
+          ls -la $HOME/openssl-${{ matrix.android_arch }}/
 
       - name: Create Meson cross-file
         run: |
@@ -146,7 +149,7 @@ jobs:
 
           [properties]
           sys_root = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot'
-          cmake_toolchain_file = '$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake'
+          cmake_defaults = false
 
           [host_machine]
           system = 'android'
@@ -161,32 +164,40 @@ jobs:
           CMAKE_ANDROID_NDK = '$ANDROID_NDK_HOME'
           CMAKE_SYSTEM_PROCESSOR = '${{ matrix.cmake_system_processor }}'
           CMAKE_ANDROID_API = '${{ matrix.api_level }}'
-          CMAKE_FIND_ROOT_PATH_MODE_PROGRAM = 'NEVER'
-          CMAKE_FIND_ROOT_PATH_MODE_LIBRARY = 'ONLY'
-          CMAKE_FIND_ROOT_PATH_MODE_INCLUDE = 'ONLY'
-          CMAKE_FIND_ROOT_PATH_MODE_PACKAGE = 'ONLY'
-          CMAKE_FIND_ROOT_PATH = '$OPENSSL_PREFIX;$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot'
-          OPENSSL_ROOT_DIR = '$OPENSSL_PREFIX'
-          OPENSSL_INCLUDE_DIR = '$OPENSSL_PREFIX/include'
-          OPENSSL_CRYPTO_LIBRARY = '$OPENSSL_PREFIX/lib/libcrypto.a'
-          OPENSSL_SSL_LIBRARY = '$OPENSSL_PREFIX/lib/libssl.a'
-          OPENSSL_LIBRARIES = '$OPENSSL_PREFIX/lib/libssl.a;$OPENSSL_PREFIX/lib/libcrypto.a'
-          OPENSSL_USE_STATIC_LIBS = 'TRUE'
+          CMAKE_TOOLCHAIN_FILE = '$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake'
+          ANDROID_ABI = '${{ matrix.android_arch }}'
+          ANDROID_PLATFORM = 'android-${{ matrix.api_level }}'
 
           [built-in options]
           c_args = ['-I$OPENSSL_PREFIX/include']
           cpp_args = ['-I$OPENSSL_PREFIX/include', '-static-libstdc++']
-          c_link_args = ['-static-libgcc', '$OPENSSL_PREFIX/lib/libssl.a', '$OPENSSL_PREFIX/lib/libcrypto.a']
-          cpp_link_args = ['-static-libgcc', '-static-libstdc++', '$OPENSSL_PREFIX/lib/libssl.a', '$OPENSSL_PREFIX/lib/libcrypto.a']
+          c_link_args = ['-static-libgcc', '-L$OPENSSL_PREFIX/lib', '-lssl', '-lcrypto']
+          cpp_link_args = ['-static-libgcc', '-static-libstdc++', '-L$OPENSSL_PREFIX/lib', '-lssl', '-lcrypto']
           EOF
           
+          echo "=== Meson cross-file ==="
           cat android-cross.ini
 
       - name: Configure Meson for Android
         env:
           PKG_CONFIG_PATH: ${{ env.HOME }}/openssl-${{ matrix.android_arch }}/lib/pkgconfig
-          OPENSSL_ROOT_DIR: ${{ env.HOME }}/openssl-${{ matrix.android_arch }}
         run: |
+          OPENSSL_PREFIX="$HOME/openssl-${{ matrix.android_arch }}"
+          
+          # Export CMake variables as environment variables
+          export OPENSSL_ROOT_DIR="$OPENSSL_PREFIX"
+          export OpenSSL_ROOT="$OPENSSL_PREFIX"
+          export OPENSSL_INCLUDE_DIR="$OPENSSL_PREFIX/include"
+          export OPENSSL_CRYPTO_LIBRARY="$OPENSSL_PREFIX/lib/libcrypto.a"
+          export OPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.a"
+          
+          echo "OpenSSL environment variables set:"
+          echo "  OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR"
+          echo "  OpenSSL_ROOT=$OpenSSL_ROOT"
+          echo "  OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR"
+          echo "  OPENSSL_CRYPTO_LIBRARY=$OPENSSL_CRYPTO_LIBRARY"
+          echo "  OPENSSL_SSL_LIBRARY=$OPENSSL_SSL_LIBRARY"
+          
           meson setup \
             --cross-file android-cross.ini \
             -Db_lto=true \
@@ -202,17 +213,27 @@ jobs:
       - name: Prepare Android binary
         run: |
           mkdir -p android-libs/${{ matrix.android_arch }}
+          
+          if [ ! -f build-android/slipstream-client ]; then
+            echo "ERROR: slipstream-client binary not found!"
+            echo "Build directory contents:"
+            ls -la build-android/
+            exit 1
+          fi
+          
           cp build-android/slipstream-client android-libs/${{ matrix.android_arch }}/libslipstream.so
           
+          # Strip debug symbols to reduce size
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
             android-libs/${{ matrix.android_arch }}/libslipstream.so
           
-          echo "=== Binary Info ==="
+          echo "=== Binary Info for ${{ matrix.android_arch }} ==="
           file android-libs/${{ matrix.android_arch }}/libslipstream.so
           ls -lh android-libs/${{ matrix.android_arch }}/libslipstream.so
           
+          echo "=== Checking dynamic dependencies ==="
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d \
-            android-libs/${{ matrix.android_arch }}/libslipstream.so | grep NEEDED || echo "✓ Statically linked"
+            android-libs/${{ matrix.android_arch }}/libslipstream.so | grep NEEDED || echo "✓ Statically linked (no NEEDED entries)"
 
       - name: Upload Android binary
         uses: actions/upload-artifact@v4
@@ -236,7 +257,10 @@ jobs:
 
       - name: Organize Android libraries
         run: |
-          mkdir -p jniLibs/arm64-v8a jniLibs/armeabi-v7a jniLibs/x86_64 jniLibs/x86
+          mkdir -p jniLibs/arm64-v8a
+          mkdir -p jniLibs/armeabi-v7a
+          mkdir -p jniLibs/x86_64
+          mkdir -p jniLibs/x86
           
           cp temp/android-arm64-v8a/libslipstream.so jniLibs/arm64-v8a/
           cp temp/android-armeabi-v7a/libslipstream.so jniLibs/armeabi-v7a/
@@ -248,33 +272,70 @@ jobs:
           
           ## Installation
           
-          Copy to: `app/src/main/jniLibs/`
+          Copy the entire `jniLibs` folder to your Android Studio project:
           
-          ## Usage
+          ```
+          YourApp/
+          └── app/
+              └── src/
+                  └── main/
+                      └── jniLibs/        <-- Copy this folder here
+                          ├── arm64-v8a/
+                          │   └── libslipstream.so
+                          ├── armeabi-v7a/
+                          │   └── libslipstream.so
+                          ├── x86_64/
+                          │   └── libslipstream.so
+                          └── x86/
+                              └── libslipstream.so
+          ```
+          
+          ## Usage in Kotlin
           
           ```kotlin
           val nativeLibDir = applicationInfo.nativeLibraryDir
           val binaryPath = File(nativeLibDir, "libslipstream.so").absolutePath
           
+          // Execute the binary
           val process = ProcessBuilder(
-              binaryPath, 
-              "domain.com", 
-              "1.1.1.1", 
-              "--socks-port", "1081"
-          ).start()
+              binaryPath,
+              "your-domain.com",
+              "1.1.1.1",
+              "--socks-port",
+              "1081"
+          ).redirectErrorStream(true).start()
           ```
+          
+          ## Binary Information
+          
           EOF
           
-          echo "Built: $(date)" >> jniLibs/README.md
+          echo "Built on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> jniLibs/README.md
+          echo "Repository: ${{ github.repository }}" >> jniLibs/README.md
+          echo "Commit: ${{ github.sha }}" >> jniLibs/README.md
+          echo "Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> jniLibs/README.md
           echo "" >> jniLibs/README.md
+          echo "### File Sizes" >> jniLibs/README.md
+          echo '```' >> jniLibs/README.md
           ls -lh jniLibs/*/*.so >> jniLibs/README.md
+          echo '```' >> jniLibs/README.md
+          
+          echo "=== README Contents ==="
+          cat jniLibs/README.md
+          
+          echo ""
+          echo "=== Final Directory Structure ==="
+          find jniLibs -type f -ls
 
       - name: Create archive
         run: |
           zip -r slipstream-android-jniLibs.zip jniLibs/
           sha256sum slipstream-android-jniLibs.zip > slipstream-android-jniLibs.zip.sha256
           
+          echo "=== Archive Created ==="
           ls -lh slipstream-android-jniLibs.zip
+          echo ""
+          echo "=== SHA256 Checksum ==="
           cat slipstream-android-jniLibs.zip.sha256
 
       - name: Upload packaged libraries
@@ -299,6 +360,11 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: List all artifacts
+        run: |
+          echo "=== All Release Artifacts ==="
+          find artifacts -type f -ls
 
       - name: Release
         uses: softprops/action-gh-release@v2
