@@ -150,7 +150,6 @@ jobs:
 
           [properties]
           sys_root = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot'
-          cmake_defaults = false
 
           [host_machine]
           system = 'android'
@@ -168,6 +167,13 @@ jobs:
           CMAKE_TOOLCHAIN_FILE = '$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake'
           ANDROID_ABI = '${{ matrix.android_arch }}'
           ANDROID_PLATFORM = 'android-${{ matrix.api_level }}'
+          CMAKE_POLICY_DEFAULT_CMP0074 = 'NEW'
+          CMAKE_FIND_ROOT_PATH = '$OPENSSL_PREFIX;$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot'
+          OPENSSL_ROOT_DIR = '$OPENSSL_PREFIX'
+          OPENSSL_INCLUDE_DIR = '$OPENSSL_PREFIX/include'
+          OPENSSL_CRYPTO_LIBRARY = '$OPENSSL_PREFIX/lib/libcrypto.a'
+          OPENSSL_SSL_LIBRARY = '$OPENSSL_PREFIX/lib/libssl.a'
+          OPENSSL_USE_STATIC_LIBS = 'TRUE'
 
           [built-in options]
           c_args = ['-I$OPENSSL_PREFIX/include']
@@ -186,9 +192,6 @@ jobs:
           echo "=== Configuration Details ==="
           echo "Architecture: ${{ matrix.android_arch }}"
           echo "OpenSSL Path: $OPENSSL_PREFIX"
-          echo "OpenSSL Include: $OPENSSL_PREFIX/include"
-          echo "OpenSSL Crypto Lib: $OPENSSL_PREFIX/lib/libcrypto.a"
-          echo "OpenSSL SSL Lib: $OPENSSL_PREFIX/lib/libssl.a"
           echo ""
           
           # Verify OpenSSL files exist
@@ -198,10 +201,6 @@ jobs:
           fi
           if [ ! -f "$OPENSSL_PREFIX/lib/libssl.a" ]; then
             echo "ERROR: libssl.a not found!"
-            exit 1
-          fi
-          if [ ! -d "$OPENSSL_PREFIX/include" ]; then
-            echo "ERROR: include directory not found!"
             exit 1
           fi
           
@@ -214,13 +213,6 @@ jobs:
             --buildtype=release \
             --warnlevel=0 \
             -Ddefault_library=static \
-            -Dcmake.OPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
-            -Dcmake.OPENSSL_INCLUDE_DIR="$OPENSSL_PREFIX/include" \
-            -Dcmake.OPENSSL_CRYPTO_LIBRARY="$OPENSSL_PREFIX/lib/libcrypto.a" \
-            -Dcmake.OPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.a" \
-            -Dcmake.OPENSSL_USE_STATIC_LIBS=TRUE \
-            -Dcmake.CMAKE_POLICY_DEFAULT_CMP0074=NEW \
-            -Dcmake.CMAKE_FIND_ROOT_PATH="$OPENSSL_PREFIX;$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
             build-android
 
       - name: Build with Ninja
