@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - "v*.*.*"
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:  # Allow manual trigger for testing
 
 env:
   BUILD_TYPE: Release
@@ -65,23 +65,27 @@ jobs:
             build/slipstream-server-${{ github.ref_name }}-linux-${{ matrix.arch }}
 
   build-android:
-    name: Build Android (${{ matrix.arch }})
+    name: Build Android (${{ matrix.android_arch }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - arch: arm64-v8a
-            target: aarch64-linux-android
-            api: 33
-          - arch: armeabi-v7a
-            target: armv7a-linux-androideabi
-            api: 33
-          - arch: x86_64
-            target: x86_64-linux-android
-            api: 33
-          - arch: x86
-            target: i686-linux-android
-            api: 33
+          - android_arch: arm64-v8a
+            target_triple: aarch64-linux-android
+            api_level: 33
+            openssl_target: android-arm64
+          - android_arch: armeabi-v7a
+            target_triple: armv7a-linux-androideabi
+            api_level: 33
+            openssl_target: android-arm
+          - android_arch: x86_64
+            target_triple: x86_64-linux-android
+            api_level: 33
+            openssl_target: android-x86_64
+          - android_arch: x86
+            target_triple: i686-linux-android
+            api_level: 33
+            openssl_target: android-x86
 
     permissions:
       contents: read
@@ -100,71 +104,110 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt install -y cmake git pkg-config ninja-build python3-pip
+          sudo apt install -y cmake git ninja-build python3-pip pkg-config perl
           pip3 install meson
 
-      - name: Setup Android cross-compilation environment
+      - name: Build OpenSSL for Android
         run: |
-          echo "NDK_ROOT=$ANDROID_NDK_HOME" >> $GITHUB_ENV
-          echo "TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
+          # Clone OpenSSL
+          git clone --depth 1 --branch openssl-3.0.15 https://github.com/openssl/openssl.git
+          cd openssl
+          
+          # Set Android environment
+          export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
+          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          
+          # Configure and build OpenSSL
+          ./Configure ${{ matrix.openssl_target }} \
+            -D__ANDROID_API__=${{ matrix.api_level }} \
+            --prefix=$HOME/openssl-${{ matrix.android_arch }} \
+            no-shared \
+            no-tests
+          
+          make -j$(nproc)
+          make install_sw
+          
+          echo "✓ OpenSSL built successfully"
+          ls -lh $HOME/openssl-${{ matrix.android_arch }}/lib/
 
       - name: Create Meson cross-file
         run: |
-          cat > android-${{ matrix.arch }}.txt << EOF
+          OPENSSL_PREFIX="$HOME/openssl-${{ matrix.android_arch }}"
+          
+          cat > android-cross.ini << EOF
           [binaries]
-          c = '${{ env.TOOLCHAIN }}/bin/${{ matrix.target }}${{ matrix.api }}-clang'
-          cpp = '${{ env.TOOLCHAIN }}/bin/${{ matrix.target }}${{ matrix.api }}-clang++'
-          ar = '${{ env.TOOLCHAIN }}/bin/llvm-ar'
-          strip = '${{ env.TOOLCHAIN }}/bin/llvm-strip'
-          pkgconfig = '/usr/bin/pkg-config'
+          c = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target_triple }}${{ matrix.api_level }}-clang'
+          cpp = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target_triple }}${{ matrix.api_level }}-clang++'
+          ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
+          strip = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'
+          pkg-config = '/usr/bin/pkg-config'
+          cmake = '/usr/bin/cmake'
+
+          [properties]
+          sys_root = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot'
 
           [host_machine]
           system = 'android'
-          cpu_family = '${{ matrix.arch == 'arm64-v8a' && 'aarch64' || matrix.arch == 'armeabi-v7a' && 'arm' || matrix.arch == 'x86_64' && 'x86_64' || 'x86' }}'
-          cpu = '${{ matrix.arch == 'arm64-v8a' && 'aarch64' || matrix.arch == 'armeabi-v7a' && 'armv7a' || matrix.arch == 'x86_64' && 'x86_64' || 'i686' }}'
+          cpu_family = '${{ matrix.android_arch == 'arm64-v8a' && 'aarch64' || matrix.android_arch == 'armeabi-v7a' && 'arm' || matrix.android_arch == 'x86_64' && 'x86_64' || 'x86' }}'
+          cpu = '${{ matrix.android_arch == 'arm64-v8a' && 'aarch64' || matrix.android_arch == 'armeabi-v7a' && 'armv7a' || matrix.android_arch == 'x86_64' && 'x86_64' || 'i686' }}'
           endian = 'little'
 
-          [properties]
-          needs_exe_wrapper = true
-          c_args = ['-static-libgcc', '-fPIC']
-          cpp_args = ['-static-libgcc', '-fPIC', '-static-libstdc++']
-          c_link_args = ['-static-libgcc']
-          cpp_link_args = ['-static-libgcc', '-static-libstdc++']
+          [cmake]
+          OPENSSL_ROOT_DIR = '$OPENSSL_PREFIX'
+          OPENSSL_INCLUDE_DIR = '$OPENSSL_PREFIX/include'
+          OPENSSL_CRYPTO_LIBRARY = '$OPENSSL_PREFIX/lib/libcrypto.a'
+          OPENSSL_SSL_LIBRARY = '$OPENSSL_PREFIX/lib/libssl.a'
+
+          [built-in options]
+          c_args = ['-I$OPENSSL_PREFIX/include']
+          cpp_args = ['-I$OPENSSL_PREFIX/include', '-static-libstdc++']
+          c_link_args = ['-static-libgcc', '$OPENSSL_PREFIX/lib/libssl.a', '$OPENSSL_PREFIX/lib/libcrypto.a']
+          cpp_link_args = ['-static-libgcc', '-static-libstdc++', '$OPENSSL_PREFIX/lib/libssl.a', '$OPENSSL_PREFIX/lib/libcrypto.a']
           EOF
+          
+          echo "=== Meson cross-file ==="
+          cat android-cross.ini
 
       - name: Configure Meson for Android
+        env:
+          PKG_CONFIG_PATH: ${{ env.HOME }}/openssl-${{ matrix.android_arch }}/lib/pkgconfig
         run: |
           meson setup \
-            --cross-file android-${{ matrix.arch }}.txt \
+            --cross-file android-cross.ini \
             -Db_lto=true \
             --buildtype=release \
             --warnlevel=0 \
             -Ddefault_library=static \
-            meson-build-android-${{ matrix.arch }}
+            build-android
 
       - name: Build with Ninja
         run: |
-          ninja -C meson-build-android-${{ matrix.arch }}
+          ninja -C build-android -v
 
-      - name: Organize Android binaries
+      - name: Prepare Android binary
         run: |
-          mkdir -p android-libs/${{ matrix.arch }}
-          cp meson-build-android-${{ matrix.arch }}/slipstream-client android-libs/${{ matrix.arch }}/libslipstream.so
+          mkdir -p android-libs/${{ matrix.android_arch }}
           
-          echo "=== Binary Info for ${{ matrix.arch }} ==="
-          ls -lh android-libs/${{ matrix.arch }}/libslipstream.so
-          file android-libs/${{ matrix.arch }}/libslipstream.so
+          # Copy the client binary
+          cp build-android/slipstream-client android-libs/${{ matrix.android_arch }}/libslipstream.so
           
-          # Check dependencies
-          echo "=== Checking dynamic dependencies ==="
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d android-libs/${{ matrix.arch }}/libslipstream.so | grep NEEDED || echo "No dynamic dependencies (statically linked)"
+          # Strip debug symbols
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
+            android-libs/${{ matrix.android_arch }}/libslipstream.so
+          
+          echo "=== Binary Info ==="
+          file android-libs/${{ matrix.android_arch }}/libslipstream.so
+          ls -lh android-libs/${{ matrix.android_arch }}/libslipstream.so
+          
+          echo "=== Checking dependencies ==="
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d \
+            android-libs/${{ matrix.android_arch }}/libslipstream.so | grep NEEDED || echo "✓ Statically linked"
 
-      - name: Upload Android library
+      - name: Upload Android binary
         uses: actions/upload-artifact@v4
         with:
-          name: android-${{ matrix.arch }}
-          path: android-libs/${{ matrix.arch }}/libslipstream.so
-          retention-days: 90
+          name: android-${{ matrix.android_arch }}
+          path: android-libs/${{ matrix.android_arch }}/libslipstream.so
 
   package-android:
     name: Package Android Libraries
@@ -178,62 +221,91 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: android-*
-          path: android-libs-temp
+          path: temp
 
-      - name: Organize for Android Studio
+      - name: Organize Android libraries
         run: |
-          mkdir -p android-libs/arm64-v8a
-          mkdir -p android-libs/armeabi-v7a
-          mkdir -p android-libs/x86_64
-          mkdir -p android-libs/x86
+          mkdir -p jniLibs/arm64-v8a
+          mkdir -p jniLibs/armeabi-v7a
+          mkdir -p jniLibs/x86_64
+          mkdir -p jniLibs/x86
           
-          cp android-libs-temp/android-arm64-v8a/libslipstream.so android-libs/arm64-v8a/
-          cp android-libs-temp/android-armeabi-v7a/libslipstream.so android-libs/armeabi-v7a/
-          cp android-libs-temp/android-x86_64/libslipstream.so android-libs/x86_64/
-          cp android-libs-temp/android-x86/libslipstream.so android-libs/x86/
+          cp temp/android-arm64-v8a/libslipstream.so jniLibs/arm64-v8a/
+          cp temp/android-armeabi-v7a/libslipstream.so jniLibs/armeabi-v7a/
+          cp temp/android-x86_64/libslipstream.so jniLibs/x86_64/
+          cp temp/android-x86/libslipstream.so jniLibs/x86/
           
-          # Create README
-          cat > android-libs/README.md << EOF
-          # Slipstream Android Libraries
+          # Create installation README
+          cat > jniLibs/README.md << 'EOF'
+          # Slipstream Android Native Libraries
           
-          Copy these folders to your Android Studio project:
-          \`\`\`
-          app/src/main/jniLibs/
-          ├── arm64-v8a/
-          │   └── libslipstream.so
-          ├── armeabi-v7a/
-          │   └── libslipstream.so
-          ├── x86_64/
-          │   └── libslipstream.so
-          └── x86/
-              └── libslipstream.so
-          \`\`\`
+          ## Installation
           
-          Built on: $(date)
-          Commit: ${{ github.sha }}
+          Copy the entire `jniLibs` folder to your Android Studio project:
+          
+          ```
+          YourApp/
+          └── app/
+              └── src/
+                  └── main/
+                      └── jniLibs/        <-- Copy this folder here
+                          ├── arm64-v8a/
+                          │   └── libslipstream.so
+                          ├── armeabi-v7a/
+                          │   └── libslipstream.so
+                          ├── x86_64/
+                          │   └── libslipstream.so
+                          └── x86/
+                              └── libslipstream.so
+          ```
+          
+          ## Usage in Kotlin/Java
+          
+          ```kotlin
+          val nativeLibDir = applicationInfo.nativeLibraryDir
+          val binaryPath = File(nativeLibDir, "libslipstream.so").absolutePath
+          
+          // Execute the binary
+          val process = ProcessBuilder(binaryPath, "domain.com", "1.1.1.1", "--socks-port", "1081")
+              .redirectErrorStream(true)
+              .start()
+          ```
+          
+          ## Binary Information
+          
           EOF
           
-          tree android-libs || ls -laR android-libs
+          echo "Built on: $(date)" >> jniLibs/README.md
+          echo "Commit: ${{ github.sha }}" >> jniLibs/README.md
+          echo "" >> jniLibs/README.md
+          echo "### File Sizes" >> jniLibs/README.md
+          echo '```' >> jniLibs/README.md
+          ls -lh jniLibs/*/*.so >> jniLibs/README.md
+          echo '```' >> jniLibs/README.md
+          
+          cat jniLibs/README.md
 
-      - name: Create Android libs archive
+      - name: Create archive
         run: |
-          cd android-libs
-          zip -r ../slipstream-android-libs.zip .
-          cd ..
-          sha256sum slipstream-android-libs.zip > slipstream-android-libs.zip.sha256
+          zip -r slipstream-android-jniLibs.zip jniLibs/
+          sha256sum slipstream-android-jniLibs.zip > slipstream-android-jniLibs.zip.sha256
+          
+          echo "=== Archive created ==="
+          ls -lh slipstream-android-jniLibs.zip
+          cat slipstream-android-jniLibs.zip.sha256
 
-      - name: Upload packaged Android libraries
+      - name: Upload packaged libraries
         uses: actions/upload-artifact@v4
         with:
-          name: android-libs-packaged
+          name: android-jniLibs-package
           path: |
-            slipstream-android-libs.zip
-            slipstream-android-libs.zip.sha256
+            slipstream-android-jniLibs.zip
+            slipstream-android-jniLibs.zip.sha256
 
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build, build-android, package-android]
+    needs: [build, package-android]
     if: github.ref_type == 'tag'
     permissions:
       contents: write
@@ -244,11 +316,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: List all artifacts
-        run: |
-          echo "=== All artifacts ==="
-          ls -laR artifacts/
 
       - name: Release
         uses: softprops/action-gh-release@v2
