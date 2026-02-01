@@ -15,6 +15,35 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
+    - name: Find Cargo.toml location
+      id: find-cargo
+      run: |
+        if [ -f "Cargo.toml" ]; then
+          echo "CARGO_DIR=." >> $GITHUB_OUTPUT
+          echo "Found Cargo.toml in root"
+        elif [ -f "slipstream-client/Cargo.toml" ]; then
+          echo "CARGO_DIR=slipstream-client" >> $GITHUB_OUTPUT
+          echo "Found Cargo.toml in slipstream-client/"
+        elif [ -f "client/Cargo.toml" ]; then
+          echo "CARGO_DIR=client" >> $GITHUB_OUTPUT
+          echo "Found Cargo.toml in client/"
+        else
+          echo "Searching for Cargo.toml..."
+          CARGO_PATH=$(find . -name "Cargo.toml" -type f | head -n 1)
+          if [ -n "$CARGO_PATH" ]; then
+            CARGO_DIR=$(dirname "$CARGO_PATH")
+            echo "CARGO_DIR=$CARGO_DIR" >> $GITHUB_OUTPUT
+            echo "Found Cargo.toml in $CARGO_DIR"
+          else
+            echo "ERROR: Could not find Cargo.toml"
+            exit 1
+          fi
+        fi
+        
+        # List directory structure for debugging
+        echo "Repository structure:"
+        ls -la
+    
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -41,10 +70,11 @@ jobs:
     - name: Cache cargo build
       uses: actions/cache@v4
       with:
-        path: target
+        path: ${{ steps.find-cargo.outputs.CARGO_DIR }}/target
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
     
     - name: Create cargo config
+      working-directory: ${{ steps.find-cargo.outputs.CARGO_DIR }}
       run: |
         mkdir -p .cargo
         cat > .cargo/config.toml << EOF
@@ -64,68 +94,106 @@ jobs:
         linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android33-clang"
         ar = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
         EOF
+        
+        echo "Cargo.toml content:"
+        cat Cargo.toml
+    
+    - name: List available binaries
+      working-directory: ${{ steps.find-cargo.outputs.CARGO_DIR }}
+      run: |
+        echo "Checking for available binaries in Cargo.toml..."
+        if grep -q "\[\[bin\]\]" Cargo.toml || grep -q "name = " Cargo.toml; then
+          echo "Binary configuration found"
+        fi
     
     - name: Build for ARM64 (aarch64)
+      working-directory: ${{ steps.find-cargo.outputs.CARGO_DIR }}
       env:
         RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static-libgcc"
       run: |
-        cargo build --release --target aarch64-linux-android --bin slipstream-client
+        cargo build --release --target aarch64-linux-android
     
     - name: Build for ARM32 (armv7)
+      working-directory: ${{ steps.find-cargo.outputs.CARGO_DIR }}
       env:
         RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static-libgcc"
       run: |
-        cargo build --release --target armv7-linux-androideabi --bin slipstream-client
+        cargo build --release --target armv7-linux-androideabi
     
     - name: Build for x86_64
+      working-directory: ${{ steps.find-cargo.outputs.CARGO_DIR }}
       env:
         RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static-libgcc"
       run: |
-        cargo build --release --target x86_64-linux-android --bin slipstream-client
+        cargo build --release --target x86_64-linux-android
     
     - name: Build for x86 (i686)
+      working-directory: ${{ steps.find-cargo.outputs.CARGO_DIR }}
       env:
         RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static-libgcc"
       run: |
-        cargo build --release --target i686-linux-android --bin slipstream-client
+        cargo build --release --target i686-linux-android
+    
+    - name: Find built binaries
+      id: find-bins
+      working-directory: ${{ steps.find-cargo.outputs.CARGO_DIR }}
+      run: |
+        echo "Searching for built binaries..."
+        
+        # Find the binary name
+        if [ -f "target/aarch64-linux-android/release/slipstream-client" ]; then
+          BINARY_NAME="slipstream-client"
+        elif [ -f "target/aarch64-linux-android/release/slipstream" ]; then
+          BINARY_NAME="slipstream"
+        else
+          echo "Looking for any executable in target/aarch64-linux-android/release/"
+          ls -la target/aarch64-linux-android/release/
+          BINARY_NAME=$(ls target/aarch64-linux-android/release/ | grep -v "\.d$" | grep -v "\.so$" | grep -v "deps" | grep -v "build" | head -n 1)
+        fi
+        
+        echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_OUTPUT
+        echo "Found binary: $BINARY_NAME"
+        
+        # Verify all architectures
+        ls -lh target/aarch64-linux-android/release/$BINARY_NAME
+        ls -lh target/armv7-linux-androideabi/release/$BINARY_NAME
+        ls -lh target/x86_64-linux-android/release/$BINARY_NAME
+        ls -lh target/i686-linux-android/release/$BINARY_NAME
     
     - name: Organize binaries for Android Studio
+      working-directory: ${{ steps.find-cargo.outputs.CARGO_DIR }}
       run: |
+        BINARY_NAME="${{ steps.find-bins.outputs.BINARY_NAME }}"
+        
         mkdir -p android-libs/arm64-v8a
         mkdir -p android-libs/armeabi-v7a
         mkdir -p android-libs/x86_64
         mkdir -p android-libs/x86
         
-        cp target/aarch64-linux-android/release/slipstream-client android-libs/arm64-v8a/libslipstream.so
-        cp target/armv7-linux-androideabi/release/slipstream-client android-libs/armeabi-v7a/libslipstream.so
-        cp target/x86_64-linux-android/release/slipstream-client android-libs/x86_64/libslipstream.so
-        cp target/i686-linux-android/release/slipstream-client android-libs/x86/libslipstream.so
+        cp target/aarch64-linux-android/release/$BINARY_NAME android-libs/arm64-v8a/libslipstream.so
+        cp target/armv7-linux-androideabi/release/$BINARY_NAME android-libs/armeabi-v7a/libslipstream.so
+        cp target/x86_64-linux-android/release/$BINARY_NAME android-libs/x86_64/libslipstream.so
+        cp target/i686-linux-android/release/$BINARY_NAME android-libs/x86/libslipstream.so
         
         # Verify files
+        echo "=== ARM64 (arm64-v8a) ==="
         ls -lh android-libs/arm64-v8a/
-        ls -lh android-libs/armeabi-v7a/
-        ls -lh android-libs/x86_64/
-        ls -lh android-libs/x86/
-        
-        # Check file types
         file android-libs/arm64-v8a/libslipstream.so
+        
+        echo "=== ARM32 (armeabi-v7a) ==="
+        ls -lh android-libs/armeabi-v7a/
         file android-libs/armeabi-v7a/libslipstream.so
+        
+        echo "=== x86_64 ==="
+        ls -lh android-libs/x86_64/
         file android-libs/x86_64/libslipstream.so
+        
+        echo "=== x86 ==="
+        ls -lh android-libs/x86/
         file android-libs/x86/libslipstream.so
-    
-    - name: Upload Android libraries
-      uses: actions/upload-artifact@v4
-      with:
-        name: android-slipstream-libs
-        path: android-libs/
-        retention-days: 90
-    
-    - name: Create Release (on tag)
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          android-libs/arm64-v8a/libslipstream.so
-          android-libs/armeabi-v7a/libslipstream.so
-          android-libs/x86_64/libslipstream.so
-          android-libs/x86/libslipstream.so
+        
+        # Check dependencies
+        echo "=== Checking dynamic dependencies for ARM64 ==="
+        $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d android-libs/arm64-v8a/libslipstream.so | grep NEEDED || echo "No dynamic dependencies (statically linked)"
+    ](#)
+
