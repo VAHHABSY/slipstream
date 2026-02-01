@@ -1,164 +1,131 @@
-name: Release slipstream
+name: Build Android Binaries
 
 on:
+  workflow_dispatch:
   push:
-    tags:
-      - "v*.*.*"
-
-env:
-  BUILD_TYPE: Release
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
-  build:
-    name: Build (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt install -y cmake git pkg-config libssl-dev ninja-build gcc g++ python3-pip
-          pip3 install meson
-
-      - name: Configure Meson
-        run: |
-          meson setup \
-            -Db_lto=true \
-            --buildtype=release \
-            --warnlevel=0 \
-            -Ddefault_library=static \
-            meson-build-release
-
-      - name: Build with Ninja
-        run: |
-          ninja -C meson-build-release
-
-      - name: Rename Binaries
-        run: |
-          VERSION=${{ github.ref_name }}
-          ARCH=${{ matrix.arch }}
-          mkdir -p build
-          mv ${{github.workspace}}/meson-build-release/slipstream-client ${{github.workspace}}/build/slipstream-client-${VERSION}-linux-${ARCH}
-          mv ${{github.workspace}}/meson-build-release/slipstream-server ${{github.workspace}}/build/slipstream-server-${VERSION}-linux-${ARCH}
-
-      - name: Upload Binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: binaries-${{ matrix.arch }}
-          path: |
-            build/slipstream-client-${{ github.ref_name }}-linux-${{ matrix.arch }}
-            build/slipstream-server-${{ github.ref_name }}-linux-${{ matrix.arch }}
-
-  release:
-    name: Create Release
+  build-android:
     runs-on: ubuntu-latest
-    needs: build
-    if: github.ref_type == 'tag'
-    permissions:
-      contents: write
-
+    
     steps:
-      - name: Download all binaries
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          generate_release_notes: true
-          files: artifacts/slipstream-*
-
-  docker-build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
-
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Extract metadata (tags, labels) for Docker (server)
-        id: meta-server
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-server
-
-      - name: Extract metadata (tags, labels) for Docker (client)
-        id: meta-client
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-client
-
-      - name: Build and push Docker image (server)
-        id: push-server
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta-server.outputs.tags }}
-          labels: ${{ steps.meta-server.outputs.labels }}
-          target: server
-
-      - name: Build and push Docker image (client)
-        id: push-client
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta-client.outputs.tags }}
-          labels: ${{ steps.meta-client.outputs.labels }}
-          target: client
-
-      - name: Generate artifact attestation (server)
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-server
-          subject-digest: ${{ steps.push-server.outputs.digest }}
-          push-to-registry: true
-
-      - name: Generate artifact attestation (client)
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-client
-          subject-digest: ${{ steps.push-client.outputs.digest }}
-          push-to-registry: true
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+    
+    - name: Setup Android NDK
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r26c
+        add-to-path: true
+    
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Create cargo config
+      run: |
+        mkdir -p .cargo
+        cat > .cargo/config.toml << EOF
+        [target.aarch64-linux-android]
+        linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
+        ar = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+        
+        [target.armv7-linux-androideabi]
+        linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi33-clang"
+        ar = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+        
+        [target.x86_64-linux-android]
+        linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
+        ar = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+        
+        [target.i686-linux-android]
+        linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android33-clang"
+        ar = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+        EOF
+    
+    - name: Build for ARM64 (aarch64)
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static-libgcc"
+      run: |
+        cargo build --release --target aarch64-linux-android --bin slipstream-client
+    
+    - name: Build for ARM32 (armv7)
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static-libgcc"
+      run: |
+        cargo build --release --target armv7-linux-androideabi --bin slipstream-client
+    
+    - name: Build for x86_64
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static-libgcc"
+      run: |
+        cargo build --release --target x86_64-linux-android --bin slipstream-client
+    
+    - name: Build for x86 (i686)
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static-libgcc"
+      run: |
+        cargo build --release --target i686-linux-android --bin slipstream-client
+    
+    - name: Organize binaries for Android Studio
+      run: |
+        mkdir -p android-libs/arm64-v8a
+        mkdir -p android-libs/armeabi-v7a
+        mkdir -p android-libs/x86_64
+        mkdir -p android-libs/x86
+        
+        cp target/aarch64-linux-android/release/slipstream-client android-libs/arm64-v8a/libslipstream.so
+        cp target/armv7-linux-androideabi/release/slipstream-client android-libs/armeabi-v7a/libslipstream.so
+        cp target/x86_64-linux-android/release/slipstream-client android-libs/x86_64/libslipstream.so
+        cp target/i686-linux-android/release/slipstream-client android-libs/x86/libslipstream.so
+        
+        # Verify files
+        ls -lh android-libs/arm64-v8a/
+        ls -lh android-libs/armeabi-v7a/
+        ls -lh android-libs/x86_64/
+        ls -lh android-libs/x86/
+        
+        # Check file types
+        file android-libs/arm64-v8a/libslipstream.so
+        file android-libs/armeabi-v7a/libslipstream.so
+        file android-libs/x86_64/libslipstream.so
+        file android-libs/x86/libslipstream.so
+    
+    - name: Upload Android libraries
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-slipstream-libs
+        path: android-libs/
+        retention-days: 90
+    
+    - name: Create Release (on tag)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          android-libs/arm64-v8a/libslipstream.so
+          android-libs/armeabi-v7a/libslipstream.so
+          android-libs/x86_64/libslipstream.so
+          android-libs/x86/libslipstream.so
