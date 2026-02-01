@@ -129,10 +129,11 @@ jobs:
           make install_sw
           
           echo "✓ OpenSSL built successfully"
+          echo ""
+          echo "=== OpenSSL installation for ${{ matrix.android_arch }} ==="
           ls -lh $HOME/openssl-${{ matrix.android_arch }}/lib/
           echo ""
-          echo "OpenSSL installation:"
-          ls -la $HOME/openssl-${{ matrix.android_arch }}/
+          ls -la $HOME/openssl-${{ matrix.android_arch }}/include/
 
       - name: Create Meson cross-file
         run: |
@@ -175,28 +176,37 @@ jobs:
           cpp_link_args = ['-static-libgcc', '-static-libstdc++', '-L$OPENSSL_PREFIX/lib', '-lssl', '-lcrypto']
           EOF
           
-          echo "=== Meson cross-file ==="
+          echo "=== Meson cross-file for ${{ matrix.android_arch }} ==="
           cat android-cross.ini
 
       - name: Configure Meson for Android
-        env:
-          PKG_CONFIG_PATH: ${{ env.HOME }}/openssl-${{ matrix.android_arch }}/lib/pkgconfig
         run: |
           OPENSSL_PREFIX="$HOME/openssl-${{ matrix.android_arch }}"
           
-          # Export CMake variables as environment variables
-          export OPENSSL_ROOT_DIR="$OPENSSL_PREFIX"
-          export OpenSSL_ROOT="$OPENSSL_PREFIX"
-          export OPENSSL_INCLUDE_DIR="$OPENSSL_PREFIX/include"
-          export OPENSSL_CRYPTO_LIBRARY="$OPENSSL_PREFIX/lib/libcrypto.a"
-          export OPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.a"
+          echo "=== Configuration Details ==="
+          echo "Architecture: ${{ matrix.android_arch }}"
+          echo "OpenSSL Path: $OPENSSL_PREFIX"
+          echo "OpenSSL Include: $OPENSSL_PREFIX/include"
+          echo "OpenSSL Crypto Lib: $OPENSSL_PREFIX/lib/libcrypto.a"
+          echo "OpenSSL SSL Lib: $OPENSSL_PREFIX/lib/libssl.a"
+          echo ""
           
-          echo "OpenSSL environment variables set:"
-          echo "  OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR"
-          echo "  OpenSSL_ROOT=$OpenSSL_ROOT"
-          echo "  OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR"
-          echo "  OPENSSL_CRYPTO_LIBRARY=$OPENSSL_CRYPTO_LIBRARY"
-          echo "  OPENSSL_SSL_LIBRARY=$OPENSSL_SSL_LIBRARY"
+          # Verify OpenSSL files exist
+          if [ ! -f "$OPENSSL_PREFIX/lib/libcrypto.a" ]; then
+            echo "ERROR: libcrypto.a not found!"
+            exit 1
+          fi
+          if [ ! -f "$OPENSSL_PREFIX/lib/libssl.a" ]; then
+            echo "ERROR: libssl.a not found!"
+            exit 1
+          fi
+          if [ ! -d "$OPENSSL_PREFIX/include" ]; then
+            echo "ERROR: include directory not found!"
+            exit 1
+          fi
+          
+          echo "✓ All OpenSSL files verified"
+          echo ""
           
           meson setup \
             --cross-file android-cross.ini \
@@ -204,11 +214,20 @@ jobs:
             --buildtype=release \
             --warnlevel=0 \
             -Ddefault_library=static \
+            -Dcmake.OPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
+            -Dcmake.OPENSSL_INCLUDE_DIR="$OPENSSL_PREFIX/include" \
+            -Dcmake.OPENSSL_CRYPTO_LIBRARY="$OPENSSL_PREFIX/lib/libcrypto.a" \
+            -Dcmake.OPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.a" \
+            -Dcmake.OPENSSL_USE_STATIC_LIBS=TRUE \
+            -Dcmake.CMAKE_POLICY_DEFAULT_CMP0074=NEW \
+            -Dcmake.CMAKE_FIND_ROOT_PATH="$OPENSSL_PREFIX;$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
             build-android
 
       - name: Build with Ninja
         run: |
+          echo "=== Starting build for ${{ matrix.android_arch }} ==="
           ninja -C build-android -v
+          echo "=== Build completed ==="
 
       - name: Prepare Android binary
         run: |
@@ -231,6 +250,7 @@ jobs:
           file android-libs/${{ matrix.android_arch }}/libslipstream.so
           ls -lh android-libs/${{ matrix.android_arch }}/libslipstream.so
           
+          echo ""
           echo "=== Checking dynamic dependencies ==="
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d \
             android-libs/${{ matrix.android_arch }}/libslipstream.so | grep NEEDED || echo "✓ Statically linked (no NEEDED entries)"
